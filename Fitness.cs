@@ -6,7 +6,7 @@ using Microsoft.Azure.WebJobs;
 using Microsoft.Azure.WebJobs.Extensions.Http;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-//using Newtonsoft.Json;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -17,41 +17,18 @@ using Carter.Request;
 using Carter.Response;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using Microsoft.Azure.WebJobs;
+using Microsoft.Azure.WebJobs.Extensions.DurableTask;
+using Newtonsoft.Json.Linq;
+using System.Net;
 
 namespace FitnessApp
 {
     public static class Fitness
     {
-
-        static Dictionary<int, TargetRequest> Target = new Dictionary<int, TargetRequest>();
         [FunctionName("target")]
         public static async Task<IActionResult> Run(
-            [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)] HttpRequest req,
-            ILogger log)
-        {
-            string requestBody = String.Empty;
-            using (StreamReader streamReader = new StreamReader(req.Body))
-            {
-                requestBody = await streamReader.ReadToEndAsync();
-            }
-            
-            //dynamic data = JsonConvert.DeserializeObject(requestBody);
-            TargetRequest t = JsonSerializer.Deserialize<TargetRequest>(requestBody);
-
-            WriteLine(t);
-            
-            //var t = await data.Bind<TargetRequest>();
-            if (Target.ContainsKey(t.id))
-            {
-                Target.Remove(t.id);
-            }
-            Target.Add(t.id, t);
-            return new OkObjectResult("works");
-        }
-
-        [FunctionName("assess")]
-        public static async Task<IActionResult> Rune(
-    [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)] HttpRequest req,
+    [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)] HttpRequest req, [DurableClient] IDurableEntityClient client,
     ILogger log)
         {
             string requestBody = String.Empty;
@@ -59,19 +36,39 @@ namespace FitnessApp
             {
                 requestBody = await streamReader.ReadToEndAsync();
             }
-            AssessRequest areq = JsonSerializer.Deserialize<AssessRequest>(requestBody);
-            //var areq = await req.Bind<AssessRequest>();
+           
+            dynamic data = JsonConvert.DeserializeObject(requestBody);
+            
+            var entityId = new EntityId("Message", "myMessage");
+            await client.SignalEntityAsync(entityId, "Add", data.target);
+            await client.SignalEntityAsync(entityId, "AddParallel", data.parallel);
+
+           
+
+            //var t = await data.Bind<TargetRequest>();
+            return new OkObjectResult("works");
+        }
+        [FunctionName("assess")]
+        public static async Task<IActionResult> Rune(
+    [HttpTrigger(AuthorizationLevel.Function, "post", Route = null)] HttpRequest req, [DurableClient] IDurableEntityClient client,
+    ILogger log)
+        {
+            string requestBody = String.Empty;
+            using (StreamReader streamReader = new StreamReader(req.Body))
+            {
+                requestBody = await streamReader.ReadToEndAsync();
+            }
+            AssessRequest areq = System.Text.Json.JsonSerializer.Deserialize<AssessRequest>(requestBody);
             
             var genomes = areq.genomes;
 
             TargetRequest t;
             var target = "";
             var parallel = false;
-            if (Target.TryGetValue(areq.id, out t))
-            {
-                target = t.target;
-                parallel = t.parallel;
-            }
+            var entityId = new EntityId("Message", "myMessage");
+            var message = await client.ReadEntityStateAsync<Message>(entityId);
+            target = message.EntityState.Get();
+            parallel = message.EntityState.GetParallel();
 
             Func<string, int> assess = g => {
                 var len = Math.Min(target.Length, g.Length);
@@ -125,5 +122,28 @@ namespace FitnessApp
         {
             return $"{{{id}, {parallel}, \"{target}\"}}";
         }
+    }
+
+    [JsonObject(MemberSerialization.OptIn)]
+    public class Message
+    {
+        [JsonProperty("target")]
+        private string CurrentValue { get; set; }
+
+        [JsonProperty("parallel")]
+        private bool parallel { get; set; }
+        public void Reset() => this.CurrentValue = null;
+
+        public void Add(string target) => this.CurrentValue = target;
+
+        public void AddParallel(bool parallel) => this.parallel = parallel;
+
+        public string Get() => this.CurrentValue;
+
+        public bool GetParallel() => this.parallel;
+
+        [FunctionName(nameof(Message))]
+        public static Task Run([EntityTrigger] IDurableEntityContext ctx)
+            => ctx.DispatchAsync<Message>();
     }
 }
